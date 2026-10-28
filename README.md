@@ -1,4 +1,4 @@
-# Community Care
+# Capy: a mental wellness webapp
 
 A simple, responsive interface prototype for the mental health community service website in the reference diagram. Built with HTML, CSS, and JavaScript, without a framework or installation step. Node.js 20+ serves the files locally.
 
