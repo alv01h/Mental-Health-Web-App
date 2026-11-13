@@ -1,0 +1,1 @@
+const db = new (require("better-sqlite3"))("app.db"); db.exec("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, account TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','organizer')), created_at TEXT NOT NULL DEFAULT (datetime('now')))"); module.exports = db;

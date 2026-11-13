@@ -1,0 +1,1 @@
+const { createUser, findUserByAccount } = require("./users"), { verifyPassword } = require("./auth"); createUser("alice", "secret123", "organizer"); const u = findUserByAccount("alice"); console.log(u, verifyPassword("secret123", u.password_hash), verifyPassword("nope", u.password_hash));
