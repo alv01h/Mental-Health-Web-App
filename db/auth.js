@@ -1,0 +1,1 @@
+const c = require("crypto"); exports.hashPassword = p => { const s = c.randomBytes(16).toString("hex"); return s + ":" + c.scryptSync(p, s, 64).toString("hex"); }; exports.verifyPassword = (p, st) => { const [s, h] = st.split(":"); return c.timingSafeEqual(Buffer.from(h, "hex"), c.scryptSync(p, s, 64)); };
