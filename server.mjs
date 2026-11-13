@@ -2,6 +2,52 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
+
+// User database (Angus): db/ is CommonJS, so load it with require.
+// Needs `npm install` inside db/ first (better-sqlite3).
+const require = createRequire(import.meta.url);
+const { findUserByAccount, findUserById } = require('./db/users.js');
+const { verifyPassword, hashPassword } = require('./db/auth.js');
+
+// ---- Sessions (server-side, in memory: restarting the server logs everyone out) ----
+const SESSION_COOKIE = 'session';
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+const sessions = new Map(); // sessionId -> { userId, expiresAt }
+const DUMMY_HASH = hashPassword(randomBytes(16).toString('hex'));
+
+function readCookie(req, name) {
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const index = part.indexOf('=');
+    if (index > -1 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return '';
+}
+
+function sessionCookie(sessionId) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  return `${SESSION_COOKIE}=${sessionId}; Path=/; Max-Age=${SESSION_TTL_MS / 1000}; HttpOnly; SameSite=Lax${secure}`;
+}
+
+function publicUser(user) {
+  return { id: user.id, account: user.account, role: user.role };
+}
+
+// Returns the logged-in user for this request, or null if the session is missing or expired.
+async function getCurrentUser(req) {
+  const sessionId = readCookie(req, SESSION_COOKIE);
+  if (!sessionId) return null;
+  const session = sessions.get(sessionId);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(sessionId);
+    return null;
+  }
+  const user = await findUserById(session.userId);
+  if (!user) sessions.delete(sessionId);
+  return user;
+}
 
 const root = path.resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -48,49 +94,53 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/session') {
       if (req.method === 'POST') {
         // # API_POST_LOGIN: Authenticate user & create session
-        // Teammate TODO:
-        // 1. Verify req.body contains { account, password }
-        // 2. Validate credentials against database/user store
-        // 3. Issue a secure session cookie (HttpOnly, Secure, SameSite)
-        // 4. Return 401 on failure, or 200 with user profile on success
+        let body;
         try {
-          const body = await readJSONBody(req);
-          return sendJSON(res, 200, {
-            user: {
-              id: 'user-preview-id',
-              account: body.account || 'demo_user',
-              role: body.account === 'admin' ? 'organizer' : 'member',
-            },
-            status: 'placeholder',
-            message: 'POST /api/session stub ready. Awaiting backend authentication setup.',
-          });
+          body = await readJSONBody(req);
         } catch {
           return sendJSON(res, 400, { error: 'Invalid JSON body' });
+        }
+        const { account, password } = body && typeof body === 'object' ? body : {};
+        if (typeof account !== 'string' || !account.trim() || typeof password !== 'string' || !password) {
+          return sendJSON(res, 400, { error: 'Account and password are required' });
+        }
+        if (account.length > 200 || password.length > 1024) {
+          return sendJSON(res, 400, { error: 'Account or password is too long' });
+        }
+        try {
+          const user = await findUserByAccount(account.trim());
+          // Check a dummy hash when the account doesn't exist so both failures take similar time.
+          const valid = await verifyPassword(password, user ? user.password_hash : DUMMY_HASH);
+          if (!user || !valid) return sendJSON(res, 401, { error: 'Invalid account or password' });
+
+          const oldSessionId = readCookie(req, SESSION_COOKIE);
+          if (oldSessionId) sessions.delete(oldSessionId);
+          const sessionId = randomBytes(32).toString('base64url');
+          sessions.set(sessionId, { userId: user.id, expiresAt: Date.now() + SESSION_TTL_MS });
+          return sendJSON(res, 200, { user: publicUser(user) }, { 'Set-Cookie': sessionCookie(sessionId) });
+        } catch (err) {
+          console.error('Login failed:', err);
+          return sendJSON(res, 500, { error: 'Login is unavailable right now. Please try again.' });
         }
       }
 
       if (req.method === 'GET') {
         // # API_GET_SESSION: Retrieve currently signed-in user session
-        // Teammate TODO:
-        // 1. Read session cookie or Authorization header from req.headers
-        // 2. Look up session in session store/database
-        // 3. Return 401 if unauthenticated, or 200 with user info if valid
-        return sendJSON(res, 200, {
-          user: {
-            id: 'user-preview-id',
-            account: 'demo_user',
-            role: 'member',
-          },
-          status: 'placeholder',
-          message: 'GET /api/session stub ready. Awaiting backend session lookup.',
-        });
+        try {
+          const user = await getCurrentUser(req);
+          if (!user) return sendJSON(res, 401, { error: 'Not logged in' });
+          return sendJSON(res, 200, { user: publicUser(user) });
+        } catch (err) {
+          console.error('Session check failed:', err);
+          return sendJSON(res, 500, { error: 'Could not check your session. Please try again.' });
+        }
       }
 
       if (req.method === 'DELETE') {
         // # API_DELETE_SESSION: End the session (logout)
-        // Teammate TODO:
-        // 1. Invalidate session in session store/database
-        // 2. Clear session cookie (Max-Age=0)
+        // Invalidate the session on the server, then tell the browser to drop the cookie.
+        const sessionId = readCookie(req, SESSION_COOKIE);
+        if (sessionId) sessions.delete(sessionId);
         res.writeHead(204, {
           'Set-Cookie': 'session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax',
         });
